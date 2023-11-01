@@ -1,41 +1,22 @@
-import numpy as np
-import time
-import cv2
 import os
-import PySimpleGUI as sg
+import time
+from flask import Flask, Response, render_template, request
+import random
+import cv2
 from notify_run import Notify
+import numpy as np
 import smtplib
 import imghdr
 from email.message import EmailMessage
 
 
-def send_email():
-    Sender_Email = "sender_email"
-    Reciever_Email = "receiver_email"
-    Password = "password"
-    newMessage = EmailMessage()                         
-    newMessage['Subject'] = "INTRUDER ALERT!!!" 
-    newMessage['From'] = Sender_Email                   
-    newMessage['To'] = Reciever_Email                   
-    newMessage.set_content('Let me know what you think. Image attached!. Visit this URL foor live feed http://192.168.244.105:5000') 
-    with open('alert.jpg', 'rb') as f:
-        image_data = f.read()
-        image_type = imghdr.what(f.name)
-        image_name = f.name
-    newMessage.add_attachment(image_data, maintype='image', subtype=image_type, filename=image_name)
-    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
-        
-        smtp.login(Sender_Email, Password)              
-        smtp.send_message(newMessage)
-
+app = Flask(__name__)
 
 notify = Notify()
-# import PySimpleGUIQt as sg        # Runs on Qt too... just change the import.
-sent_mail = False
 
 y_path = r'yolo-coco'
 
-sg.theme('LightGreen')
+sent_mail = False
 
 gui_confidence = .6     # initial settings
 gui_threshold = .3      # initial settings
@@ -53,10 +34,6 @@ COLORS = np.random.randint(0, 255, size=(len(LABELS), 3), dtype="uint8")
 weightsPath = os.path.sep.join([y_path, "yolov3.weights"])
 configPath = os.path.sep.join([y_path, "yolov3.cfg"])
 
-# load our YOLO object detector trained on COCO dataset (80 classes)
-# and determine only the *output* layer names that we need from YOLO
-sg.popup_quick_message('Loading ...', background_color='red', text_color='white')
-
 net = cv2.dnn.readNetFromDarknet(configPath, weightsPath)
 ln = net.getLayerNames()
 # ln = [ln[i[0] - 1] for i in net.getUnconnectedOutLayers()]        # old code changed on Feb-4-2022
@@ -66,14 +43,17 @@ ln = [ln[i - 1] for i in net.getUnconnectedOutLayers()]
 # frame dimensions
 W, H = None, None
 win_started = False
-cap = cv2.VideoCapture(camera_number)  # initialize the capture device
-while True:
-    # read the next frame from the file or webcam
-    grabbed, frame = cap.read()
+
+
+camera = cv2.VideoCapture(0)  
+
+def is_human_detected():
+    W, H = None, None
+    grabbed, frame = camera.read()
 
     # if the frame was not grabbed, then we stream has stopped so break out
     if not grabbed:
-        break
+        return
 
     # if the frame dimensions are empty, grab them
     if not W or not H:
@@ -145,37 +125,78 @@ while True:
             text = "{}: {:.4f}".format(LABELS[classIDs[i]],
                                        confidences[i])
 
-            if ( LABELS[classIDs[i]] == "person" ):
-                if ( not sent_mail ):
-                    '''Subscribe to receive notifications : https://notify.run/QxrtKMxileiw0EBzJtnm'''
-                    notify.send('ALERT! HUMAN DETECTED!!!', 'http://192.168.244.105:5000')
-                    cv2.imwrite('alert.jpg',frame)
-                    send_email()
-                    sent_mail = True
-                
+            cv2.imwrite('alert.jpg',frame)
+            return LABELS[classIDs[i]] == "person"
 
-            cv2.putText(frame, text, (x, y - 5),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+def gen_frames():  
+    while True:
+        success, frame = camera.read() 
+        if not success:
+            break
+        else:
+            ret, buffer = cv2.imencode('.jpg', frame)
+            frame = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n') 
 
-    imgbytes = cv2.imencode('.ppm', frame)[1].tobytes()
-    # ---------------------------- THE GUI ----------------------------
-    if not win_started:
-        win_started = True
-        layout = [
-            [sg.Text('Smart Alarm System', size=(30, 1))],
-            [sg.Graph((W, H), (0,0), (W,H), key='-GRAPH-')],
-            
-            [sg.Exit()]
-        ]
-        window = sg.Window('YOLO Webcam Demo', layout, default_element_size=(14, 1), text_justification='right', auto_size_text=False, finalize=True)
-        image_elem = window['-GRAPH-']     # type: sg.Graph
-    else:
-        image_elem.erase()
-        image_elem.draw_image(data=imgbytes, location=(0, H))
 
-    event, values = window.read(timeout=0)
-    if event is None or event == 'Exit':
-        break
+def send_email():
+    Sender_Email = "example@example.com"
+    Reciever_Email = "example@example.com"
+    Password = "ExamplePassword"
+    newMessage = EmailMessage()                         
+    newMessage['Subject'] = "INTRUDER ALERT!!!" 
+    newMessage['From'] = Sender_Email                   
+    newMessage['To'] = Reciever_Email                   
+    newMessage.set_content('Let me know what you think. Image attached!. Visit this URL foor live feed http://192.168.139.214:5000/video') 
+    with open('alert.jpg', 'rb') as f:
+        image_data = f.read()
+        image_type = imghdr.what(f.name)
+        image_name = f.name
+    newMessage.add_attachment(image_data, maintype='image', subtype=image_type, filename=image_name)
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        
+        smtp.login(Sender_Email, Password)              
+        smtp.send_message(newMessage)
 
-print("[INFO] cleaning up...")
-window.close()
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+@app.route('/video')
+def video():
+    """Video streaming home page."""
+    return render_template('index.html')
+
+def notify_user(msg):
+    notify.send(msg, 'http://192.168.139.214:5000/video')
+
+
+@app.route('/', methods=["POST"])
+def index():
+    global sent_mail
+    if ( request.json["soundDetected"] ):
+        notify_user("Sound Detected!!!")
+        print("Sound Detected")
+    if ( request.json["motionDetected"] ):
+        print("Motion Detected")
+        notify_user("Motion Detected!!!")
+        if ( is_human_detected() ):
+            #if ( not sent_mail ):
+                notify_user("HIGH ALERT! INTRUDER DETECTED!!!")
+                send_email()
+                #sent_mail = True
+    if ( request.json["distanceDetected"] ):
+        print("Distance Detected")
+        notify_user("Someone is nearing!!!")
+        if ( is_human_detected() ):
+            #if ( not sent_mail ):
+                notify_user("HIGH ALERT! INTRUDER DETECTED!!!")
+                send_email()
+                #sent_mail = True
+
+    return "Hello, World! " + str(random.randint(0, 100)) + " " + str(request.data)
+
+app.run(host="192.168.139.214", port=5000, debug=True)
